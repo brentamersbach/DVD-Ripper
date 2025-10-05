@@ -187,7 +187,7 @@ while true ; do
     rip
     if [[ $! != 0 ]] ; then
 		error="Rip failed, check messages"
-		exit 1
+		read -p "Continue?"
     fi
     
     copy
