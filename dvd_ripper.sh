@@ -1,5 +1,7 @@
 #! /usr/bin/env bash
 
+# set -x
+
 temp_dir="/Users/bamersbach/Desktop/MakeMKV"
 targetServer="bamersbach@server.mac-anu.com"
 sshKey="/Users/bamersbach/.ssh/id_rsa"
@@ -8,6 +10,7 @@ targetDir="/Volumes/Data_RAID/DVD Rips"
 source_device=""
 volume_name=""
 outfile=""
+error=""
 
 termHeight=""
 termWidth=""
@@ -18,56 +21,29 @@ function initTerm {
 	termHeight=$(tput lines)
 	termWidth=$(tput cols)
 	scrollHeight=$(($termHeight - 2))
-	printf "\e[s"					# Save cursor position
+	printf "\e[?1049h"				# Enable alternate screen buffer
 	printf '\e[1;'$scrollHeight'r'	# Set scroll region
-	printf "\e[u"					# Restore cursor
 }
 
 function deinitTerm {
 	printf "\e[?25h"				# Show cursor
 	printf '\e[49m\e[39m'			# Restore default colors
-	printf "\e[r"					# Reset scroll region
+	printf '\e[?1049l'				# Disable alternate screen buffer
+# 	printf '\e[1;'$termHeight'r'	# Reset scroll region
 }
 
-function progress {
-	local messagesLength=""
-	local line=""
+function exitScript {
+	# Uh-oh gotta go
+	[[ $(pgrep makemkvcon) ]] && pkill makemkvcon
+	[[ $(ps $progressPID) ]] && kill $progressPID &>/dev/null
+	deinitTerm
 	
-	printf "\e[?25l"	# Hide cursor
-	
-	while true ; do
-		# Make sure the terminal hasn't changed on us
-		[[ $(tput lines) != "${termHeight}" ]] && initTerm
-		
-		# See if we have a new message from makemkvcon and print it
-		local newLine="$(tail -n 1 "${temp_dir}/messages.txt")"
-		if [[ "$newLine" != "$line" ]] ; then
-			line="${newLine}"
-			printf '%s\n' "$line"
-		fi				
-		
-		# Do a bunch of ANSI terminal stuff and show the current progress
-		printf "\e[s"							# Save cursor position
-		
-		printf '\e['$termHeight';0H'			# Move to bottom line
-		printf '\e[0;30m\e[102m'				# Black text on Green background
-		tail -n 1 "${temp_dir}/progress.txt"
-		sleep 1
-		printf '\e[49m\e[39m'					# Restore default colors
-		printf "\e[2K"							# Erase line
-		printf "\e[u"							# Restore cursor position
-		
-		[[ $(pgrep makemkvcon) ]] || break		# Bail if makemkvcon is no longer running
-	done
-	
-	printf "\e[?25h"	# Show cursor
-	
-	return 0
+	[[ -z "${error}" ]] || printf '\e[31m\e[1mFatal: %s\e[0m\n' "${error}"
 }
 
 function setup {
     local diskList="$(diskutil list external physical)"
-    [[ -z $diskList ]] && echo "No disc" && exit 1
+    [[ -z $diskList ]] && error="No disc" && exit 1
     source_device="$(grep -e 'disk\d$' <<< "${diskList}"| head -n 1 | \
     	awk '{print $NF}')"
 	echo "${diskList}"
@@ -106,6 +82,43 @@ function ripConfig {
 	fi
 }
 
+function progress {
+	local messagesLength=""
+	local line=""
+	
+	sleep 1				# Take a beat for makemkvcon to get going and start logging
+	printf "\e[?25l"	# Hide cursor
+	
+	while true ; do
+		# Make sure the terminal hasn't changed on us
+		[[ $(tput lines) != "${termHeight}" ]] && initTerm
+		
+		# See if we have a new message from makemkvcon and print it
+		local newLine="$(tail -n 1 "${temp_dir}/messages.txt")"
+		if [[ "$newLine" != "$line" ]] ; then
+			line="${newLine}"
+			printf '%s\n' "$line"
+		fi				
+		
+		# Do a bunch of ANSI terminal stuff and show the current progress
+		printf "\e[s"							# Save cursor position
+		
+		printf '\e['$termHeight';0H'			# Move to bottom line
+		printf '\e[0;30m\e[102m'				# Black text on Green background
+		tail -n 1 "${temp_dir}/progress.txt"
+		sleep 1
+		printf '\e[49m\e[39m'					# Restore default colors
+		printf "\e[2K"							# Erase line
+		printf "\e[u"							# Restore cursor position
+		
+		[[ $(pgrep makemkvcon) ]] || break		# Bail if makemkvcon is no longer running
+	done
+	
+	printf "\e[?25h"	# Show cursor
+	
+	return 0
+}
+
 function rip {
 	ripConfig
 	
@@ -114,6 +127,13 @@ function rip {
     diskutil unmount /dev/$source_device
     progress &
 	progressPID=$!
+	
+	# If we have trouble with a disc, we can fall back to dd
+	# dd if=/dev/"${source_device}" of="${outfile}"  \
+# 		conv=sync,noerror \
+# 		bs=1M \
+# 		status=progress \
+# 		speed=2097152
 	
     makemkvcon \
     	--decrypt \
@@ -157,15 +177,6 @@ function copy {
     printf -- "\n\e[32m\e[1m${volume_name} upload complete\e[0m\n\n"
 }
 
-function exitScript {
-	[[ -z $1 ]] || printf 'Fatal: %s' "$1"
-
-	# Uh-oh gotta go
-	[[ $(pgrep makemkvcon) ]] && pkill makemkvcon
-	[[ $(ps $progressPID) ]] && kill $progressPID
-	deinitTerm
-}
-
 trap exitScript EXIT
 
 initTerm
@@ -173,7 +184,12 @@ setup
 
 # Main loop
 while true ; do
-    rip || exitScript "Rip failed"
+    rip
+    if [[ $! != 0 ]] ; then
+		error="Rip failed, check messages"
+		exit 1
+    fi
+    
     copy
     diskutil eject $source_device
     read -p $'\n\e[34m\e[1mPress return to continue\e[0m' continue
