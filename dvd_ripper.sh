@@ -2,25 +2,27 @@
 
 # set -x
 
+# Global config
 temp_dir="/Users/bamersbach/Desktop/MakeMKV"
 targetServer="bamersbach@server.mac-anu.com"
 sshKey="/Users/bamersbach/.ssh/id_rsa"
 targetDir="/Volumes/Data_RAID/DVD Rips"
 
+# Variables for ripping
 source_device=""
 volume_name=""
 outfile=""
 error=""
 
+# Terminal config variables
 termHeight=""
 termWidth=""
 scrollHeight=""
-progressPID=""
 
 function initTerm {
 	termHeight=$(tput lines)
 	termWidth=$(tput cols)
-	scrollHeight=$(($termHeight - 2))
+	scrollHeight=$(($termHeight - 3))
 	printf "\e[?1049h"				# Enable alternate screen buffer
 	printf '\e[1;'$scrollHeight'r'	# Set scroll region
 }
@@ -90,11 +92,8 @@ function progress {
 	local linesToPrint=""
 	local progHeight=$(($termHeight - 1))
 	
-	sleep 1				# Take a beat for makemkvcon to get going and start logging
 	printf "\e[?25l"	# Hide cursor
-	
-	printf "\e[s"							# Save cursor position
-	
+	printf "\e[s"		# Save cursor position
 	
 	while true ; do
 		# Make sure the terminal hasn't changed on us
@@ -103,17 +102,18 @@ function progress {
 		printf '\e['$progHeight';0H'	# Move to bottom of screen
 		
 		# Do a bunch of ANSI terminal stuff and show the current progress
-		
-		local currentAction="$(grep -i "Current action" "${temp_dir}/progress.txt" | tail -n 1)"
+		local currentAction=\
+			"$(grep -i "Current action" "${temp_dir}/progress.txt" | tail -n 1)"
 		local progressLine="$(tail -n 1 "${temp_dir}/progress.txt")"
-		printf '\e[0;30m\e[102m\e[0J %s \n %s\e[49m\e[39m' "${currentAction}" "${progressLine}"
+		printf '\e[0;30m\e[102m\e[0J %s \n %s\e[49m\e[39m' \
+			"${currentAction}" "${progressLine}"
 		sleep 1		
 		
-		[[ $(pgrep makemkvcon) ]] || break		# Bail if makemkvcon is no longer running
+		[[ $(pgrep makemkvcon) ]] || break # Bail if makemkvcon is no longer running
 	done
 	
 	printf "\e[?25h"	# Show cursor
-	printf "\e[u"							# Restore cursor position
+	printf "\e[u"		# Restore cursor position
 	
 	return 0
 }
@@ -138,7 +138,6 @@ function rip {
 		--progress="${temp_dir}/progress.txt" \
 		--cache=128 \
     	backup disc:"$discId" "$outfile" &
-#     	| grep -v "BUP"
     
     progress
     
