@@ -29,13 +29,12 @@ function deinitTerm {
 	printf "\e[?25h"				# Show cursor
 	printf '\e[49m\e[39m'			# Restore default colors
 	printf '\e[?1049l'				# Disable alternate screen buffer
-# 	printf '\e[1;'$termHeight'r'	# Reset scroll region
+	printf '\e[1;'$termHeight'r'	# Reset scroll region
 }
 
 function exitScript {
 	# Uh-oh gotta go
 	[[ $(pgrep makemkvcon) ]] && pkill makemkvcon
-	[[ $(ps $progressPID) ]] && kill $progressPID &>/dev/null
 	deinitTerm
 	
 	[[ -z "${error}" ]] || printf '\e[31m\e[1mFatal: %s\e[0m\n' "${error}"
@@ -80,41 +79,41 @@ function ripConfig {
     if ssh -i "$sshKey" "$targetServer" "stat $safePath" &>/dev/null ; then
     	printf "\nFile exists on target, choose something else\n" && renameOutput
 	fi
+	
+	# Clean up the previous files
+	rm -f "${temp_dir}/messages.txt"
+	rm -f "${temp_dir}/progress.txt"
 }
 
 function progress {
-	local messagesLength=""
-	local line=""
+	local msgLength="0"
+	local linesToPrint=""
+	local progHeight=$(($termHeight - 1))
 	
 	sleep 1				# Take a beat for makemkvcon to get going and start logging
 	printf "\e[?25l"	# Hide cursor
 	
+	printf "\e[s"							# Save cursor position
+	
+	
 	while true ; do
 		# Make sure the terminal hasn't changed on us
-		[[ $(tput lines) != "${termHeight}" ]] && initTerm
+		[[ $(tput lines) != "${termHeight}" ]] && initTerm		
 		
-		# See if we have a new message from makemkvcon and print it
-		local newLine="$(tail -n 1 "${temp_dir}/messages.txt")"
-		if [[ "$newLine" != "$line" ]] ; then
-			line="${newLine}"
-			printf '%s\n' "$line"
-		fi				
+		printf '\e['$progHeight';0H'	# Move to bottom of screen
 		
 		# Do a bunch of ANSI terminal stuff and show the current progress
-		printf "\e[s"							# Save cursor position
 		
-		printf '\e['$termHeight';0H'			# Move to bottom line
-		printf '\e[0;30m\e[102m'				# Black text on Green background
-		tail -n 1 "${temp_dir}/progress.txt"
-		sleep 1
-		printf '\e[49m\e[39m'					# Restore default colors
-		printf "\e[2K"							# Erase line
-		printf "\e[u"							# Restore cursor position
+		local currentAction="$(grep -i "Current action" "${temp_dir}/progress.txt" | tail -n 1)"
+		local progressLine="$(tail -n 1 "${temp_dir}/progress.txt")"
+		printf '\e[0;30m\e[102m\e[0J %s \n %s\e[49m\e[39m' "${currentAction}" "${progressLine}"
+		sleep 1		
 		
 		[[ $(pgrep makemkvcon) ]] || break		# Bail if makemkvcon is no longer running
 	done
 	
 	printf "\e[?25h"	# Show cursor
+	printf "\e[u"							# Restore cursor position
 	
 	return 0
 }
@@ -125,8 +124,6 @@ function rip {
     printf -- "\nRipping $volume_name...\n"
     local starttime="$(date "+%s")"
     diskutil unmount /dev/$source_device
-    progress &
-	progressPID=$!
 	
 	# If we have trouble with a disc, we can fall back to dd
 	# dd if=/dev/"${source_device}" of="${outfile}"  \
@@ -140,11 +137,10 @@ function rip {
 		--messages="${temp_dir}/messages.txt" \
 		--progress="${temp_dir}/progress.txt" \
 		--cache=128 \
-    	backup disc:"$discId" "$outfile"
+    	backup disc:"$discId" "$outfile" &
 #     	| grep -v "BUP"
     
-	sleep 1			# Take a beat so progress function can clean up
-    progressPID=""	# Clear this so we don't accidentally kill some other process
+    progress
     
     local endtime="$(date "+%s")"
     local difftime=$(("$endtime"-"$starttime"))
@@ -154,8 +150,9 @@ function rip {
     printf "\n\e[32m\e[1mRipped %sGB in %s minutes\e[0m\n\n" $fileSize $difftime
     
     # MakeMKV doesn't return non-zero on failure, so we need to check the messages
-    if [[ $(grep -i "Backup failed" "${temp_dir}/messages.txt") ]] ; then
-    	printf '\n\e[31m\e[1mMakeMKV seems to have failed\e[0m\n\n'
+    grep -i "Backup done" "${temp_dir}/messages.txt"
+    if [[ $? != 0 ]] ; then
+    	printf "\n\e[31m\e[1mMakeMKV seems to have failed, check messages\e[0m\n\n"
     	return 1
     fi
 }
@@ -167,7 +164,7 @@ function renameOutput {
 }
 
 function copy {
-    printf -- "Uploading $volume_name...\n"
+    printf -- "\nUploading $volume_name...\n"
     scp -i "${sshKey}" "${outfile}" "${targetServer}:${targetDir}/"
     if [[ $? != 0 ]] ; then
 		printf '\n\e[31m\e[1mRemote copy failed\e[0m\n\n'
@@ -185,12 +182,7 @@ setup
 # Main loop
 while true ; do
     rip
-    if [[ $! != 0 ]] ; then
-		error="Rip failed, check messages"
-		read -p "Continue?"
-    fi
-    
-    copy
+    copy || read -p "Copy failure, continue?"
     diskutil eject $source_device
     read -p $'\n\e[34m\e[1mPress return to continue\e[0m' continue
     if [[ -z $continue ]] ; then
