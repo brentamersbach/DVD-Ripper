@@ -39,7 +39,7 @@ function exitScript {
 	[[ $(pgrep makemkvcon) ]] && pkill makemkvcon
 	deinitTerm
 	
-	[[ -z "${error}" ]] || printf '\e[31m\e[1mFatal: %s\e[0m\n' "${error}"
+	[[ -z "${error}" ]] || printf '\e[31m\e[1mFatal: %s\e[0m\n\n' "${error}"
 }
 
 function setup {
@@ -102,8 +102,8 @@ function progress {
 		printf '\e['$progHeight';0H'	# Move to bottom of screen
 		
 		# Do a bunch of ANSI terminal stuff and show the current progress
-		local currentAction=\
-			"$(grep -i "Current action" "${temp_dir}/progress.txt" | tail -n 1)"
+		local currentAction="$(grep -i "Current action" "${temp_dir}/progress.txt" 2>/dev/null | \
+			tail -n 1)"
 		local progressLine="$(tail -n 1 "${temp_dir}/progress.txt")"
 		printf '\e[0;30m\e[102m\e[0J %s \n %s\e[49m\e[39m' \
 			"${currentAction}" "${progressLine}"
@@ -112,9 +112,11 @@ function progress {
 		[[ $(pgrep makemkvcon) ]] || break # Bail if makemkvcon is no longer running
 	done
 	
-	printf "\e[?25h"	# Show cursor
-	printf "\e[u"		# Restore cursor position
-	
+	printf '\e['$progHeight';0H'	# Move to bottom of screen
+	printf '\e[\e[0J'				# Erase to end of screen
+	printf "\e[u"					# Restore cursor position
+	printf "\e[?25h"				# Show cursor
+
 	return 0
 }
 
@@ -175,23 +177,23 @@ function copy {
 
 trap exitScript EXIT
 
-initTerm
-setup
-
-# Main loop
-while true ; do
-    rip
-    copy || read -p "Copy failure, continue?"
-    diskutil eject $source_device
-    read -p $'\n\e[34m\e[1mPress return to continue\e[0m' continue
-    if [[ -z $continue ]] ; then
-        printf -- "\n------------\n"
-        continue
-    else
-        break
-    fi
-done
-
-deinitTerm
+	initTerm
+	setup
+	
+	# Main loop
+	while true ; do
+		rip
+		copy || read -p "Copy failure, continue?"
+		diskutil eject $source_device
+		read -p $'\n\e[34m\e[1mPress return to continue\e[0m' continue
+		if [[ -z $continue ]] ; then
+			printf -- "\n------------\n"
+			continue
+		else
+			break
+		fi
+	done
+	
+	deinitTerm
 
 exit 0
