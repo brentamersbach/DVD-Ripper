@@ -65,38 +65,59 @@ function setup {
 	echo "${diskList}"
 	# This requires bash 4.x to work
     read -e -p "Use which disk? " -i "$source_device" source_device
+    printf '\n\e(0q\e[%sb\e(2\n\n' $(("$termWidth"-1))	# Horizontal divider line
 }
 
 function ripConfig {
     # Using volume name as the name of the output .iso file. Piping through 
     # xargs trims leading/trailing whitespace
-    volume_name="$(\
-        diskutil info /dev/disk4 \
-        | grep "Volume Name" \
-        | xargs \
-        | cut -d ' ' -f 3-)"
+    local volumeInfo="$(diskutil info ${source_device})"
     [[ "${PIPESTATUS[0]}" -eq 0 ]] || (echo "Disc not ready" ; return 1)
-    outfile="${temp_dir}/$volume_name.iso"
-    discId="$(makemkvcon -r info disc | grep ${source_device} | \
-    	cut -d ',' -f 1 | tail -c 2)"
+    volume_name="$(\
+        grep "Volume Name" <<< "${volumeInfo}" \
+        | xargs \
+        | cut -d ' ' -f 3-\
+    )"
+    local mediaType="$(\
+    	grep -i "Optical Media Type" <<< ${volumeInfo} \
+    	| awk '{print $NF}'\
+	)"
+    local sourceSize="$(\
+    	grep -i "Disk Size" <<< ${volumeInfo} \
+    	| cut -w -f 4-5 \
+    	| sed 's/\t/ /'\
+    )"
+    
+    discId="$(\
+    	makemkvcon -r info disc \
+    	| grep ${source_device} \
+    	| cut -d ',' -f 1 \
+    	| tail -c 2\
+	)"
 
 	# Confirming settings
     printf -- "Source device: ${source_device}\n"
-    printf -- "Output file: ${outfile}\n"
+    printf -- "Source size: ${sourceSize}\n"
+    printf -- "Media type: ${mediaType}\n"
+    printf -- "Output name: ${volume_name}\n"
     printf -- "Disc ID: ${discId}\n"
     
     # Get output file name
     local response=""
-    read -t 15 -p $'\e[34m\e[1mPress return to continue or n to rename file: \e[0m' response
-    if [[ "$response" = "n" ]] ; then
+    read -t 15 -p $'\e[34m\e[1m\nPress return to continue or [r]ename file: \e[0m\a' response
+    if [[ "$response" = "r" ]] ; then
     	renameOutput
     fi
     
     # Does that file already exist? We don't want to clobber something.
-	local safePath=$(echo "$targetDir"/"$volume_name.iso" | sed -e 's/ /\\ /g')
+	local safePath=$(echo "$targetDir"/"$volume_name" | sed -e 's/ /\\ /g')
+	
     if ssh -i "$sshKey" "$targetServer" "stat $safePath" &>/dev/null ; then
     	printf "\nFile exists on target, choose something else\n" && renameOutput
 	fi
+	
+	outfile="${temp_dir}/${volume_name}"
+    [[ "${mediaType}" = "DVD-ROM" ]] && outfile+=".iso"
 	
 	# Clean up the previous files
 	rm -f "${temp_dir}/messages.txt"
@@ -139,9 +160,9 @@ function progress {
 function rip {
 	ripConfig || (echo "Rip config failure" ; return 1)
 	
-    printf -- "\n\e[1mRipping $volume_name...\e[22m\n"
+    printf -- "\n\n\e[1mRipping $volume_name...\e[22m\n"
     local starttime="$(date "+%s")"
-    diskutil unmount /dev/$source_device
+    diskutil unmount /dev/$source_device 1>/dev/null
 	
 	# If we have trouble with a disc, we can fall back to dd
 	# dd if=/dev/"${source_device}" of="${outfile}"  \
@@ -168,21 +189,24 @@ function rip {
     
     local endtime="$(date "+%s")"
     local difftime=$(("$endtime"-"$starttime"))
-    difftime=$(bc <<< "scale=2;$difftime/60")
-    local fileSize="$(stat -f %z "$outfile")"
-    fileSize=$(bc <<< "scale=2;$fileSize/1024/1024/1024")
-    printf "\n\e[32m\e[1mRipped %sGB in %s minutes\e[0m\n\n" $fileSize $difftime
+    local fileSize="$(du -cm ${outfile} | tail -n 1 | cut -f 1)"	# Get total size in MB
+    local dataRate=$(bc <<< "scale=2;$fileSize/$difftime")	
+    
+	difftime=$(bc <<< "scale=2;$difftime/60")		# Convert to minutes
+    fileSize=$(bc <<< "scale=2;$fileSize/1024")		# Convert to gigabytes
+    printf "\n\e[32m\e[1mRipped %sGB in %s minutes (%s mbps)\e[0m\n" \
+    	$fileSize $difftime $dataRate
 }
 
 function renameOutput {
 	# This requires bash 4.x to work
 	read -e -p "Enter new name: " -i "$volume_name" volume_name
-	outfile="$temp_dir/$volume_name.iso"
+	printf "\nOutput name: %s\n" "${volume_name}"
 }
 
 function copy {
     printf -- "\n\e[1mUploading $volume_name...\e[22m\n"
-    scp -i "${sshKey}" "${outfile}" "${targetServer}:${targetDir}/"
+    scp -r -i "${sshKey}" "${outfile}" "${targetServer}:${targetDir}/"
     if [[ $? != 0 ]] ; then
 		printf '\n\e[31m\e[1mRemote copy failed\e[0m\n\n'
         return 1
@@ -202,7 +226,7 @@ while true ; do
 	rip && (copy || read -p "Copy failure, continue?")
 	read -p $'\e[34m\e[1mPress return to eject disc\e[0m\a'
 	diskutil eject $source_device
-	read -p $'\n\e[34m\e[1mPress return to continue\e[0m' continue
+	read -p $'\n\e[34m\e[1mPress return to continue\e[0m\a' continue
 	if [[ -z $continue ]] ; then
 		printf '\n\e(0q\e[%sb\e(2\n\n' $(("$termWidth"-1))	# Horizontal divider line
 		continue
