@@ -189,7 +189,7 @@ function rip {
     
     local endtime="$(date "+%s")"
     local difftime=$(("$endtime"-"$starttime"))
-    local fileSize="$(du -cm ${outfile} | tail -n 1 | cut -f 1)"	# Get total size in MB
+    local fileSize=$(bc <<< "scale=2;$(stat -f %z "${outfile}")/1024/1024")	# Get total size in MB
     local dataRate=$(bc <<< "scale=2;$fileSize/$difftime")	
     
 	difftime=$(bc <<< "scale=2;$difftime/60")		# Convert to minutes
