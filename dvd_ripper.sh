@@ -4,7 +4,7 @@
 
 # Dependencies:
 # macOS
-# bash 4.x
+# bash 4.x or greater
 # MakeMKV
 
 # Global config
@@ -13,10 +13,7 @@ targetServer="bamersbach@server.mac-anu.com"
 sshKey="/Users/bamersbach/.ssh/id_rsa"
 targetDir="/Volumes/Data_RAID/DVD Rips"
 
-# Variables for ripping
-source_device=""
-volume_name=""
-outfile=""
+# Global state
 error=""
 
 # Terminal config variables
@@ -24,6 +21,11 @@ termHeight=""
 termWidth=""
 scrollHeight=""
 bannerMsg="DVD Ripper"
+
+# Variables for ripping
+source_device=""
+volume_name=""
+outfile=""
 
 function initTerm {
 	termHeight=$(tput lines)
@@ -49,12 +51,29 @@ function deinitTerm {
 
 }
 
+# Let's banish some of this ANSI formatting nightmare into functions
+
+function printSuccess {
+	local message="$1"
+	printf '\n\e[32m\e[1m%s\e[0m\n\n' "${message}"
+}
+
+function printNotice {
+	local message="$1"
+	printf "\n\e[1m%s\e[22m\n" "${message}"
+}
+
+function printError {
+	local message="$1"
+	printf '\n\e[31m\e[1m%s\e[0m\n' "${message}"
+}
+
 function exitScript {
 	# Uh-oh gotta go
 	[[ $(pgrep makemkvcon) ]] && pkill makemkvcon
 	deinitTerm
 	
-	[[ -z "${error}" ]] || printf '\n\e[31m\e[1mFatal: %s\e[0m\n' "${error}"
+	[[ -z "${error}" ]] || printError "Fatal: ${error}"
 }
 
 function setup {
@@ -72,7 +91,7 @@ function ripConfig {
     # Using volume name as the name of the output .iso file. Piping through 
     # xargs trims leading/trailing whitespace
     local volumeInfo="$(diskutil info ${source_device})"
-    [[ "${PIPESTATUS[0]}" -eq 0 ]] || (echo "Disc not ready" ; return 1)
+    [[ $? -eq 0 ]] || (printError "Disc not ready" ; return 1)
     volume_name="$(\
         grep "Volume Name" <<< "${volumeInfo}" \
         | xargs \
@@ -158,9 +177,9 @@ function progress {
 }
 
 function rip {
-	ripConfig || (echo "Rip config failure" ; return 1)
+	ripConfig || (printError "Rip config failure" ; return 1)
 	
-    printf -- "\n\n\e[1mRipping $volume_name...\e[22m\n"
+    printNotice "Ripping ${volume_name}..."
     local starttime="$(date "+%s")"
     diskutil unmount /dev/$source_device 1>/dev/null
 	
@@ -183,19 +202,21 @@ function rip {
     # MakeMKV doesn't return non-zero on failure, so we need to check the messages
     grep -i "Backup done" "${temp_dir}/messages.txt"
     if [[ $? != 0 ]] ; then
-    	printf "\n\e[31m\e[1mMakeMKV seems to have failed, check messages\e[0m\n\n"
+    	printError "MakeMKV seems to have failed, check messages"
     	return 1
     fi
     
+    # Calculate time spent on ripping
     local endtime="$(date "+%s")"
     local difftime=$(("$endtime"-"$starttime"))
-    local fileSize=$(bc <<< "scale=2;$(stat -f %z "${outfile}")/1024/1024")	# Get total size in MB
-    local dataRate=$(bc <<< "scale=2;$fileSize/$difftime")	
+    # Get total size of output in MB
+    local fileSize=$(bc <<< "scale=2;$(du -mc "${outfile}" | tail -n 1 | cut -f 1)")
+    # Calculate approximate rip data rate
+    local dataRate=$(bc <<< "scale=2;$fileSize/$difftime")
     
 	difftime=$(bc <<< "scale=2;$difftime/60")		# Convert to minutes
     fileSize=$(bc <<< "scale=2;$fileSize/1024")		# Convert to gigabytes
-    printf "\n\e[32m\e[1mRipped %sGB in %s minutes (%s mbps)\e[0m\n" \
-    	$fileSize $difftime $dataRate
+    printSuccess "Ripped ${fileSize}GB in ${difftime} minutes (${dataRate} mbps)"
 }
 
 function renameOutput {
@@ -205,14 +226,23 @@ function renameOutput {
 }
 
 function copy {
-    printf -- "\n\e[1mUploading $volume_name...\e[22m\n"
-    scp -r -i "${sshKey}" "${outfile}" "${targetServer}:${targetDir}/"
+	local starttime="$(date "+%s")"
+    printNotice "Uploading $volume_name at $(date +%H:%M:%S)..."
+    
+    scp -qr -i "${sshKey}" "${outfile}" "${targetServer}:${targetDir}/" &>/dev/null
     if [[ $? != 0 ]] ; then
-		printf '\n\e[31m\e[1mRemote copy failed\e[0m\n\n'
+		printError "Remote copy failed"
         return 1
 	fi
+	
+	local fileSize=$(bc <<< "scale=2;$(du -mc "${outfile}" | tail -n 1 | cut -f 1)")
+	local endtime="$(date "+%s")"
+    local difftime=$(("$endtime"-"$starttime"))
+    local dataRate=$(bc <<< "scale=2;$fileSize/$difftime")
+    difftime=$(bc <<< "scale=2;$difftime/60")		# Convert to minutes
+    
     rm -rf "${outfile}"
-    printf -- "\n\e[32m\e[1m${volume_name} upload complete\e[0m\n\n"
+    printSuccess "${volume_name} upload complete at $(date +%H:%M:%S) (${dataRate}mbps)"
 }
 
 trap exitScript EXIT
