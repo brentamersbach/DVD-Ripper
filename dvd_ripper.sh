@@ -7,6 +7,9 @@
 # bash 4.x or greater
 # MakeMKV
 
+####################################### Variables ########################################
+
+
 # Global config
 temp_dir="/Users/bamersbach/Desktop/MakeMKV"
 targetServer="bamersbach@server.mac-anu.com"
@@ -27,40 +30,50 @@ source_device=""
 volume_name=""
 outfile=""
 
+####################################### Functions ########################################
+
 function initTerm {
 	termHeight=$(tput lines)
 	termWidth=$(tput cols)
 	scrollHeight=$(($termHeight - 3))
 	local bannerLen=${#bannerMsg}
 	local spacing=$(bc <<< "(${termWidth}-${bannerLen})/2-1")
-	printf '\e[0J'					# Clear to end of screen to clean up any artifacts
-	printf '\e[0;0H'				# Move to top left corner
+	
+	tput civis						# Hide cursor
+	stty -echo						# Hide input
+	tput ed							# Clear to end of screen to clean up any artifacts
+	tput cup 0 0					# Move to top left corner
 	# Print banner
 	printf '\e[0;30m\e[107m\e[1m \e[%sb%s \e[%sb\e[0K\e[0m\n' \
 		$spacing "${bannerMsg}" $spacing
-	printf '\e[3;'$scrollHeight'r'	# Set scroll region
-	# Move to start of third line and reset colors
-	printf '\e[49m\e[39m\e[22m\e[3;0H'				
+	tput csr 3 "${scrollHeight}"	# Set scroll region
+	tput sgr0						# Reset colors
+	tput cup 3 0					# Move to start of third line
 }
 
 function deinitTerm {
-	printf "\e[?25h"				# Show cursor
-	printf '\e[49m\e[39m'			# Restore default colors
-	printf '\e[1;'$termHeight'r'	# Reset scroll region
-	printf '\e[?1049l'				# Disable alternate screen buffer
-
+	tput cvvis						# Show cursor
+	stty echo						# Show input
+	tput sgr0						# Restore default colors
+	tput csr 1 "($termHeight)"		# Reset scroll region
+	tput rmcup						# Disable alternate screen buffer
 }
 
 # Let's banish some of this ANSI formatting nightmare into functions
 
 function printSuccess {
 	local message="$1"
-	printf '\n\e[32m\e[1m%s\e[0m\n\n' "${message}"
+	printf '\n\e[32m\e[1m%s\e[0m\n' "${message}"
 }
 
 function printNotice {
 	local message="$1"
-	printf "\n\e[1m%s\e[22m\n" "${message}"
+	printf '\n\e[1m%s\e[22m\n' "${message}"
+}
+
+function printRequest {
+	local message="$1"
+	printf '\e[34m\e[1m\n%s\e[0m\a\n' "${message}"
 }
 
 function printError {
@@ -68,12 +81,20 @@ function printError {
 	printf '\n\e[31m\e[1m%s\e[0m\n' "${message}"
 }
 
-function exitScript {
-	# Uh-oh gotta go
-	[[ $(pgrep makemkvcon) ]] && pkill makemkvcon
-	deinitTerm
-	
-	[[ -z "${error}" ]] || printError "Fatal: ${error}"
+function printDivider {
+	local width=$1
+	printf '\n\e(0q\e[%sb\e(2\n\n' "${width}"
+}
+
+function flushInput {
+	# This is needed to prevent stray characters 
+	# in the stdin buffer from causing weird behavior
+	ttySettings=$(stty -g)
+    stty -icanon min 0 time 0
+
+    while read none; do :; done 
+
+    stty $ttySettings
 }
 
 function setup {
@@ -81,10 +102,17 @@ function setup {
     [[ -z $diskList ]] && error="No disc" && exit 1
     source_device="$(grep -e 'disk\d$' <<< "${diskList}"| head -n 1 | \
     	awk '{print $NF}')"
+    	
 	echo "${diskList}"
+	tput cvvis ; stty echo
 	# This requires bash 4.x to work
-    read -e -p "Use which disk? " -i "$source_device" source_device
-    printf '\n\e(0q\e[%sb\e(2\n\n' $(("$termWidth"-1))	# Horizontal divider line
+    flushInput ; read -re \
+    -p "$(printRequest "Use which disk? ")" \
+    -i "${source_device}" \
+    source_device
+    tput civis ; stty -echo
+    
+    printDivider $(("$termWidth"-1))
 }
 
 function ripConfig {
@@ -122,9 +150,10 @@ function ripConfig {
     printf -- "Disc ID: ${discId}\n"
     
     # Get output file name
-    local response=""
-    read -t 15 -p $'\e[34m\e[1m\nPress return to continue or [r]ename file: \e[0m\a' response
-    if [[ "$response" = "r" ]] ; then
+    
+    printRequest "[r]ename file or press any key to continue"
+    flushInput ; read -rs -n 1 -t 15 -p "$()"
+    if [[ "$REPLY" = "r" ]] ; then
     	renameOutput
     fi
     
@@ -132,7 +161,7 @@ function ripConfig {
 	local safePath=$(echo "$targetDir"/"$volume_name" | sed -e 's/ /\\ /g')
 	
     if ssh -i "$sshKey" "$targetServer" "stat $safePath" &>/dev/null ; then
-    	printf "\nFile exists on target, choose something else\n" && renameOutput
+    	printError "File exists on target, choose something else" && renameOutput
 	fi
 	
 	outfile="${temp_dir}/${volume_name}"
@@ -146,16 +175,15 @@ function ripConfig {
 function progress {
 	local msgLength="0"
 	local linesToPrint=""
-	local progHeight=$(($termHeight - 1))
+	local progHeight=$(($termHeight - 2))
 	
-	printf "\e[?25l"	# Hide cursor
-	printf "\e[s"		# Save cursor position
+	tput sc		# Save cursor position
 	
 	while true ; do
 		# Make sure the terminal hasn't changed on us
 		[[ $(tput lines) != "${termHeight}" ]] && initTerm		
 		
-		printf '\e['$progHeight';0H'	# Move to bottom of screen
+		tput cup $progHeight 0	# Move to start of progress area
 		
 		# Do a bunch of ANSI terminal stuff and show the current progress
 		local currentAction="$(grep -i "Current action" "${temp_dir}/progress.txt" 2>/dev/null | \
@@ -168,10 +196,9 @@ function progress {
 		[[ $(pgrep makemkvcon) ]] || break # Bail if makemkvcon is no longer running
 	done
 	
-	printf '\e['$progHeight';0H'	# Move to bottom of screen
-	printf '\e[\e[0J'				# Erase to end of screen
-	printf "\e[u"					# Restore cursor position
-	printf "\e[?25h"				# Show cursor
+	tput cup $progHeight 0	# Move to start of progress area
+	tput ed					# Erase to end of screen
+	tput rc					# Restore cursor position
 
 	return 0
 }
@@ -221,7 +248,9 @@ function rip {
 
 function renameOutput {
 	# This requires bash 4.x to work
-	read -e -p "Enter new name: " -i "$volume_name" volume_name
+	tput cvvis ; stty echo
+	flushInput ; read -re -p "Enter new name: " -i "$volume_name" volume_name
+	tput civis ; stty -echo
 	printf "\nOutput name: %s\n" "${volume_name}"
 }
 
@@ -229,7 +258,7 @@ function copy {
 	local starttime="$(date "+%s")"
     printNotice "Uploading $volume_name at $(date +%H:%M:%S)..."
     
-    scp -qr -i "${sshKey}" "${outfile}" "${targetServer}:${targetDir}/" &>/dev/null
+    scp -r -i "${sshKey}" "${outfile}" "${targetServer}:${targetDir}/" 1>/dev/null
     if [[ $? != 0 ]] ; then
 		printError "Remote copy failed"
         return 1
@@ -242,26 +271,42 @@ function copy {
     difftime=$(bc <<< "scale=2;$difftime/60")		# Convert to minutes
     
     rm -rf "${outfile}"
-    printSuccess "${volume_name} upload complete at $(date +%H:%M:%S) (${dataRate}mbps)"
+    printSuccess "${volume_name} upload complete at $(date +%H:%M:%S) (${dataRate} mbps)"
 }
+
+function exitScript {
+	# Uh-oh gotta go
+	[[ $(pgrep makemkvcon) ]] && pkill makemkvcon
+	deinitTerm
+	
+	[[ -z "${error}" ]] || printError "Fatal: ${error}"
+}
+
+###################################### Main Program ######################################
 
 trap exitScript EXIT
 
-printf "\e[?1049h"	# Enable alternate screen buffer
+tput smcup	# Enable alternate screen buffer
+
 initTerm
 setup
 
 # Main loop
 while true ; do
-	rip && (copy || read -p "Copy failure, continue?")
-	read -p $'\e[34m\e[1mPress return to eject disc\e[0m\a'
-	diskutil eject $source_device
-	read -p $'\n\e[34m\e[1mPress return to continue\e[0m\a' continue
-	if [[ -z $continue ]] ; then
-		printf '\n\e(0q\e[%sb\e(2\n\n' $(("$termWidth"-1))	# Horizontal divider line
-		continue
-	else
+	rip && (copy || read -p "$(printError "Copy failure, press any key to continue")")
+	
+	printRequest "Press any key to eject disc"
+	flushInput ; read -rs -n 1
+	printf 'Please wait...\n'
+	diskutil eject $source_device &>/dev/null
+	
+	printRequest "Press any key to continue or [q]uit"
+	flushInput ; read -rs -n 1
+	if [[ $REPLY = "q" ]] ; then
 		break
+	else
+		printDivider $(("$termWidth"-1))
+		continue
 	fi
 done
 
