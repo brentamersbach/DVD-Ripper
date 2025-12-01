@@ -6,15 +6,18 @@
 # macOS
 # bash 4.x or greater
 # MakeMKV
+# GNU sed
 
 ####################################### Variables ########################################
 
 
 # Global config
-temp_dir="/Users/bamersbach/Desktop/MakeMKV"
-targetServer="bamersbach@server.mac-anu.com"
-sshKey="/Users/bamersbach/.ssh/id_rsa"
-targetDir="/Volumes/Data_RAID/DVD Rips"
+sourceDisk=""					# Device in /dev we are reading from
+temp_dir="$HOME/Desktop"		# Where to store the output file and logs while ripping
+targetUser=""					# User for login to remote server
+targetServer=""					# Remote server to copy ripped files to
+sshKey=""						# SSH key for remote server login
+targetDir=""					# Directory on remote server to copy into
 
 # Global state
 error=""
@@ -35,7 +38,7 @@ outfile=""
 function initTerm {
 	termHeight=$(tput lines)
 	termWidth=$(tput cols)
-	scrollHeight=$(($termHeight - 3))
+	scrollHeight=$(($termHeight - 4))
 	local bannerLen=${#bannerMsg}
 	local spacing=$(bc <<< "(${termWidth}-${bannerLen})/2-1")
 	
@@ -52,11 +55,11 @@ function initTerm {
 }
 
 function deinitTerm {
-	tput cvvis						# Show cursor
 	stty echo						# Show input
 	tput sgr0						# Restore default colors
 	tput csr 1 "($termHeight)"		# Reset scroll region
 	tput rmcup						# Disable alternate screen buffer
+	tput cvvis						# Show cursor
 }
 
 # Let's banish some of this ANSI formatting nightmare into functions
@@ -97,21 +100,53 @@ function flushInput {
     stty $ttySettings
 }
 
+function processOptions {
+	while getopts "d:t:u:s:k:o:" option ; do
+		case "${option}" in
+			d) source_device="$OPTARG" ;;
+			t) temp_dir="$OPTARG" ;;
+			u) targetUser="$OPTARG" ;;
+			s) targetServer="$OPTARG" ;;
+			k) sshKey="$OPTARG" ;;
+			o) targetDir="$OPTARG" ;;
+		esac	
+	done
+
+	# Check global configs and bail if any are empty
+	# If not empty, are they valid? I dunno, who cares.
+	[[ -z "${temp_dir}" ]] && fatal "Temp directory not specified"
+	[[ -z "${targetUser}" ]] && fatal "SSH user not specified"
+	[[ -z "${targetServer}" ]] && fatal "Target SSH server not specified"
+	[[ -z "${sshKey}" ]] && fatal "SSH key not specified"
+	[[ -z "${targetDir}" ]] && fatal "Target directory not specified"	
+}	
+
 function setup {
     local diskList="$(diskutil list external physical)"
-    [[ -z $diskList ]] && error="No disc" && exit 1
-    source_device="$(grep -e 'disk\d$' <<< "${diskList}"| head -n 1 | \
-    	awk '{print $NF}')"
-    	
-	echo "${diskList}"
-	tput cvvis ; stty echo
-	# This requires bash 4.x to work
-    flushInput ; read -re \
-    -p "$(printRequest "Use which disk? ")" \
-    -i "${source_device}" \
-    source_device
-    tput civis ; stty -echo
+    [[ -z $diskList ]] && fatal "No Disc"
     
+    if [[ -z $source_device ]] ; then
+		source_device="$(grep -e 'disk\d$' <<< "${diskList}"| head -n 1 | \
+			awk '{print $NF}')"
+			
+		echo "${diskList}"
+		tput cvvis ; stty echo
+		# This requires bash 4.x to work
+		flushInput ; read -re \
+			-p "$(printRequest "Use which disk? ")" \
+			-i "${source_device}" \
+			source_device
+		tput civis ; stty -echo
+	fi
+	
+	printNotice "Config Summary:"
+	printf 'Source Device: %s\n' "${source_device}"
+	printf 'Temp Directory: %s\n' "${temp_dir}"
+	printf '\nSSH User: %s\n' "${targetUser}"
+	printf 'Target Server: %s\n' "${targetServer}"
+	printf 'SSH Key: %s\n' "${sshKey}"
+	printf 'Target Directory: %s\n' "${targetDir}" 
+
     printDivider $(("$termWidth"-1))
 }
 
@@ -143,11 +178,10 @@ function ripConfig {
 	)"
 
 	# Confirming settings
-    printf -- "Source device: ${source_device}\n"
+	printf -- "Media type: ${mediaType}\n"
     printf -- "Source size: ${sourceSize}\n"
-    printf -- "Media type: ${mediaType}\n"
-    printf -- "Output name: ${volume_name}\n"
-    printf -- "Disc ID: ${discId}\n"
+    printf -- "Output file name: ${volume_name}\n"
+    printf -- "MakeMKV Disc ID: ${discId}\n"
     
     # Get output file name
     
@@ -158,9 +192,10 @@ function ripConfig {
     fi
     
     # Does that file already exist? We don't want to clobber something.
-	local safePath=$(echo "$targetDir"/"$volume_name" | sed -e 's/ /\\ /g')
+	local safeTargetPath="$(gsed -E 's/([^\\]) /$1\\ /g' <<< "${safeTargetDir}/${volume_name}")"
+	[[ "${mediaType}" = "DVD-ROM" ]] && safeTargetPath+=".iso"
 	
-    if ssh -i "$sshKey" "$targetServer" "stat $safePath" &>/dev/null ; then
+    if ssh -i "$sshKey" "$targetServer" "stat $safeTargetPath" &>/dev/null ; then
     	printError "File exists on target, choose something else" && renameOutput
 	fi
 	
@@ -175,30 +210,34 @@ function ripConfig {
 function progress {
 	local msgLength="0"
 	local linesToPrint=""
-	local progHeight=$(($termHeight - 2))
+	local progHeight=$(($termHeight - 3))
 	
 	tput sc		# Save cursor position
 	
 	while true ; do
+	
 		# Make sure the terminal hasn't changed on us
 		[[ $(tput lines) != "${termHeight}" ]] && initTerm		
 		
 		tput cup $progHeight 0	# Move to start of progress area
 		
 		# Do a bunch of ANSI terminal stuff and show the current progress
+		local currentOperation="$(grep -i "Current operation" "${temp_dir}/progress.txt" 2>/dev/null | \
+			tail -n 1)"
 		local currentAction="$(grep -i "Current action" "${temp_dir}/progress.txt" 2>/dev/null | \
 			tail -n 1)"
-		local progressLine="$(tail -n 1 "${temp_dir}/progress.txt")"
-		printf '\e[0;30m\e[102m\e[0J %s \n %s\e[49m\e[39m' \
-			"${currentAction}" "${progressLine}"
+		local currentProgress="$(grep -i "Current progress" "${temp_dir}/progress.txt" 2>/dev/null | \
+			tail -n 1)"
+		printf '\e[0;30m\e[102m\e[0J %s\n %s\n\e[1m %s\e[22m\e[49m\e[39m' \
+			"${currentOperation}" "${currentAction}" "${currentProgress}"
 		sleep 1		
 		
 		[[ $(pgrep makemkvcon) ]] || break # Bail if makemkvcon is no longer running
 	done
 	
 	tput cup $progHeight 0	# Move to start of progress area
-	tput ed					# Erase to end of screen
 	tput rc					# Restore cursor position
+	tput ed					# Erase to end of screen
 
 	return 0
 }
@@ -251,14 +290,14 @@ function renameOutput {
 	tput cvvis ; stty echo
 	flushInput ; read -re -p "Enter new name: " -i "$volume_name" volume_name
 	tput civis ; stty -echo
-	printf "\nOutput name: %s\n" "${volume_name}"
 }
 
 function copy {
 	local starttime="$(date "+%s")"
     printNotice "Uploading $volume_name at $(date +%H:%M:%S)..."
     
-    scp -r -i "${sshKey}" "${outfile}" "${targetServer}:${targetDir}/" 1>/dev/null
+#     local safeTargetDir=$(gsed -E 's/([^\]) /\1\\ /g' <<< $targetDir)
+    scp -r -i "${sshKey}" "${outfile}" "${targetUser}@${targetServer}":"${targetDir}/" 1>/dev/null
     if [[ $? != 0 ]] ; then
 		printError "Remote copy failed"
         return 1
@@ -274,7 +313,12 @@ function copy {
     printSuccess "${volume_name} upload complete at $(date +%H:%M:%S) (${dataRate} mbps)"
 }
 
-function exitScript {
+function fatal {
+	error="$1"
+	exit 1
+}
+
+function cleanup {
 	# Uh-oh gotta go
 	[[ $(pgrep makemkvcon) ]] && pkill makemkvcon
 	deinitTerm
@@ -284,7 +328,9 @@ function exitScript {
 
 ###################################### Main Program ######################################
 
-trap exitScript EXIT
+trap cleanup EXIT
+
+processOptions "$@"	# Have to pass in argv for getopts to work inside a function
 
 tput smcup	# Enable alternate screen buffer
 
@@ -301,7 +347,7 @@ while true ; do
 	diskutil eject $source_device &>/dev/null
 	
 	printRequest "Press any key to continue or [q]uit"
-	flushInput ; read -rs -n 1
+	flushInput ; read -rs -n 1 -t 300
 	if [[ $REPLY = "q" ]] ; then
 		break
 	else
