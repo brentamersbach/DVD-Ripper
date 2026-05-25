@@ -37,6 +37,7 @@ function printDivider {
 function cleanup {
 	# Uh-oh gotta go
 	while [[ $(pgrep HandBrakeCLI) != "" ]] ; do
+		printNotice "Killing HandBrakeCLI processes, please wait..."
 		pkill HandBrakeCLI
 		sleep 1
 	done
@@ -45,9 +46,9 @@ function cleanup {
 }
 
 function transcode {
-	rm -f ${temp_dir}/handbrake.txt 	# Clean up previous log
     
     local filePrefix="$(basename "${infile}" | sed -e 's/\.iso$//')"
+    
     
     printNotice "Transcoding ${filePrefix} at $(date +%H:%M:%S)..."
     
@@ -64,17 +65,19 @@ function transcode {
 	local inputDir="$(dirname "${infile}" | sed -e 's/\\//')"
 	local outdir="${temp_dir}/${filePrefix}"
 	mkdir -p "${outdir}"
+	local handbrakeLog="${outdir}/${filePrefix}-handbrake.txt"
 	
 	for title in $(seq -w 1 ${titleMax}) ; do
 		printf 'Encoding title %s/%s at %s\n' "${title}" "${titleMax}" "$(date +%H:%M:%S)"
+
 		HandBrakeCLI \
-			--preset-import-gui --no-dvdnav \
+			--preset-import-gui --no-dvdnav \ #TODO: Make this load preset from a file
 			-Z "DVD Transcode" \
 			-t "${title}" \
 			-i "${infile}" \
 			-o "${outdir}/${filePrefix}-${title}.mkv" 2>&1 \
-		| cat >> ${temp_dir}/handbrake.txt
-		[[ ${PIPESTATUS[0]} -eq 0 ]] || ( printError "Handbrake failed, check log" ; exit 1 )
+		| cat >> "${handbrakeLog}"
+		[[ ${PIPESTATUS[0]} -eq 0 ]] || ( printError "Handbrake failed, check log" )
 	done		
 
 	local endtime="$(date "+%s")"
