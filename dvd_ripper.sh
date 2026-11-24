@@ -18,6 +18,7 @@ targetUser=""					# User for login to remote server
 targetServer=""					# Remote server to copy ripped files to
 sshKey=""						# SSH key for remote server login
 targetDir=""					# Directory on remote server to copy into
+noCopy="0"
 
 # Global state
 error=""
@@ -26,12 +27,13 @@ error=""
 termHeight=""
 termWidth=""
 scrollHeight=""
-bannerMsg="DVD Ripper"
+BANNERMSG="DVD Ripper"
 
 # Variables for ripping
 source_device=""
 volume_name=""
 outfile=""
+mediaType=""
 
 ####################################### Functions ########################################
 
@@ -39,7 +41,7 @@ function initTerm {
 	termHeight=$(tput lines)
 	termWidth=$(tput cols)
 	scrollHeight=$(($termHeight - 4))
-	local bannerLen=${#bannerMsg}
+	local bannerLen=${#BANNERMSG}
 	local spacing=$(bc <<< "(${termWidth}-${bannerLen})/2-1")
 	
 	tput civis						# Hide cursor
@@ -48,7 +50,7 @@ function initTerm {
 	tput cup 0 0					# Move to top left corner
 	# Print banner
 	printf '\e[0;30m\e[107m\e[1m \e[%sb%s \e[%sb\e[0K\e[0m\n' \
-		$spacing "${bannerMsg}" $spacing
+		$spacing "${BANNERMSG}" $spacing
 	tput csr 3 "${scrollHeight}"	# Set scroll region
 	tput sgr0						# Reset colors
 	tput cup 3 0					# Move to start of third line
@@ -101,20 +103,22 @@ function flushInput {
 }
 
 function processOptions {
-	while getopts "d:t:u:s:k:o:" option ; do
+	while getopts "d:t:u:s:k:o:n" option ; do
 		case "${option}" in
-			d) source_device="$OPTARG" ;;
-			t) temp_dir="$OPTARG" ;;
-			u) targetUser="$OPTARG" ;;
-			s) targetServer="$OPTARG" ;;
-			k) sshKey="$OPTARG" ;;
-			o) targetDir="$OPTARG" ;;
+			'd') source_device="$OPTARG" ;;
+			't') temp_dir="$OPTARG" ;;
+			'u') targetUser="$OPTARG" ;;
+			's') targetServer="$OPTARG" ;;
+			'k') sshKey="$OPTARG" ;;
+			'o') targetDir="$OPTARG" ;;
+			'n') noCopy="1"
 		esac	
 	done
 
 	# Check global configs and bail if any are empty
 	# If not empty, are they valid? I dunno, who cares.
 	[[ -z "${temp_dir}" ]] && fatal "Temp directory not specified"
+	[[ $noCopy = "1" ]] && return
 	[[ -z "${targetUser}" ]] && fatal "SSH user not specified"
 	[[ -z "${targetServer}" ]] && fatal "Target SSH server not specified"
 	[[ -z "${sshKey}" ]] && fatal "SSH key not specified"
@@ -142,25 +146,32 @@ function setup {
 	printNotice "Config Summary:"
 	printf 'Source Device: %s\n' "${source_device}"
 	printf 'Temp Directory: %s\n' "${temp_dir}"
-	printf '\nSSH User: %s\n' "${targetUser}"
-	printf 'Target Server: %s\n' "${targetServer}"
-	printf 'SSH Key: %s\n' "${sshKey}"
-	printf 'Target Directory: %s\n' "${targetDir}" 
+	
+	if [[ $noCopy = 1 ]] ; then
+		printf 'Copy disabled\n'
+	else
+		printf '\nSSH User: %s\n' "${targetUser}"
+		printf 'Target Server: %s\n' "${targetServer}"
+		printf 'SSH Key: %s\n' "${sshKey}"
+		printf 'Target Directory: %s\n' "${targetDir}"
+	fi
 
     printDivider $(("$termWidth"-1))
 }
 
 function ripConfig {
-    # Using volume name as the name of the output .iso file. Piping through 
-    # xargs trims leading/trailing whitespace
+    # Using volume name as the name of the output .iso file.  
+    # Piping through xargs trims leading/trailing whitespace
+    # sed is handling single quotes that may occur in the file name
     local volumeInfo="$(diskutil info ${source_device})"
     [[ $? -eq 0 ]] || (printError "Disc not ready" ; return 1)
     volume_name="$(\
         grep "Volume Name" <<< "${volumeInfo}" \
+        | sed -e 's/'"'"'//g' \
         | xargs \
         | cut -d ' ' -f 3-\
     )"
-    local mediaType="$(\
+    mediaType="$(\
     	grep -i "Optical Media Type" <<< ${volumeInfo} \
     	| awk '{print $NF}'\
 	)"
@@ -195,7 +206,7 @@ function ripConfig {
 	local safeTargetPath="$(gsed -E 's/([^\\]) /$1\\ /g' <<< "${safeTargetDir}/${volume_name}")"
 	[[ "${mediaType}" = "DVD-ROM" ]] && safeTargetPath+=".iso"
 	
-    if ssh -i "$sshKey" "$targetServer" "stat $safeTargetPath" &>/dev/null ; then
+    if ssh -i "$sshKey" "${targetUser}@${targetServer}" "stat $safeTargetPath" &>/dev/null ; then
     	printError "File exists on target, choose something else" && renameOutput
 	fi
 	
@@ -205,6 +216,7 @@ function ripConfig {
 	# Clean up the previous files
 	rm -f "${temp_dir}/messages.txt"
 	rm -f "${temp_dir}/progress.txt"
+	rm -f "${temp_dir}/copylog.txt"
 }
 
 function progress {
@@ -245,7 +257,7 @@ function progress {
 function rip {
 	ripConfig || (printError "Rip config failure" ; return 1)
 	
-    printNotice "Ripping ${volume_name}..."
+    printNotice "Ripping ${volume_name} at $(date +%H:%M:%S)..."
     local starttime="$(date "+%s")"
     diskutil unmount /dev/$source_device 1>/dev/null
 	
@@ -293,24 +305,25 @@ function renameOutput {
 }
 
 function copy {
+	[[ $noCopy = "1" ]] && return
+
 	local starttime="$(date "+%s")"
-    printNotice "Uploading $volume_name at $(date +%H:%M:%S)..."
-    
-#     local safeTargetDir=$(gsed -E 's/([^\]) /\1\\ /g' <<< $targetDir)
-    scp -r -i "${sshKey}" "${outfile}" "${targetUser}@${targetServer}":"${targetDir}/" 1>/dev/null
-    if [[ $? != 0 ]] ; then
+	printNotice "Uploading $volume_name at $(date +%H:%M:%S)..."
+	
+	scp -r -i "${sshKey}" "${outfile}" "${targetUser}@${targetServer}":"${targetDir}/" 1>"${temp_dir}/copylog.txt"
+	if [[ $? != 0 ]] ; then
 		printError "Remote copy failed"
-        return 1
+		return 1
 	fi
 	
 	local fileSize=$(bc <<< "scale=2;$(du -mc "${outfile}" | tail -n 1 | cut -f 1)")
 	local endtime="$(date "+%s")"
-    local difftime=$(("$endtime"-"$starttime"))
-    local dataRate=$(bc <<< "scale=2;$fileSize/$difftime")
-    difftime=$(bc <<< "scale=2;$difftime/60")		# Convert to minutes
-    
-    rm -rf "${outfile}"
-    printSuccess "${volume_name} upload complete at $(date +%H:%M:%S) (${dataRate} mbps)"
+	local difftime=$(("$endtime"-"$starttime"))
+	local dataRate=$(bc <<< "scale=2;$fileSize/$difftime")
+	difftime=$(bc <<< "scale=2;$difftime/60")		# Convert to minutes
+	
+	rm -rf "${outfile}"
+	printSuccess "${volume_name} upload complete at $(date +%H:%M:%S) (${dataRate} mbps)"
 }
 
 function fatal {
